@@ -319,7 +319,7 @@ else
   echo
   info "El probador no esta instalado, asi que no puedo verificar el protocolo."
   info "Instalalo con:"
-  info "  curl -fsSL https://raw.githubusercontent.com/DarkFull0726/Bhttp/refs/heads/main/bhttp-probe.sh -o /usr/local/bin/bhttp-probe && chmod +x /usr/local/bin/bhttp-probe"
+  info "  curl -fsSL https://raw.githubusercontent.com/Leonardo1991231/Bhttp/refs/heads/main/bhttp-probe.sh -o /usr/local/bin/bhttp-probe && chmod +x /usr/local/bin/bhttp-probe"
 fi
 
 echo
