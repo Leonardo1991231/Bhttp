@@ -18,10 +18,13 @@ NC="\033[0m"
 linea() { printf "${CYAN}%s${NC}\n" "──────────────────────────────────────────────────────────────────────"; }
 
 DB_LIMITES="/usr/local/lib/bhttp/limites.db"
+FIREWALL_DB="/usr/local/lib/bhttp/firewall.rules"
 CPU_PREV_TOTAL=""
 CPU_PREV_IDLE=""
 mkdir -p /usr/local/lib/bhttp
 touch "$DB_LIMITES"
+touch "$FIREWALL_DB"
+chmod 600 "$DB_LIMITES" "$FIREWALL_DB" 2>/dev/null
 
 if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}[ERROR] Ejecuta el panel como root (sudo bhttp).${NC}"
@@ -47,7 +50,8 @@ fi
 
 # Obtener métricas del sistema, puertos y usuarios en vivo
 get_stats() {
-    PUERTOS_ACTIVOS=$(grep -h -oP '(?<=--port )\d+' /etc/systemd/system/bhttp*.service 2>/dev/null | tr '\n' ' ')
+    PUERTOS_LISTA=$(grep -h -oP '(?<=--port )\d+' /etc/systemd/system/bhttp*.service 2>/dev/null | tr '\n' ' ')
+    PUERTOS_ACTIVOS="$PUERTOS_LISTA"
     PUERTO_PRINCIPAL=$(grep -h -oP '(?<=--port )\d+' /etc/systemd/system/bhttp.service 2>/dev/null | head -1)
     SSH_BACKEND_PORT=$(grep -h -oP '(?<=--backend-port )\d+' /etc/systemd/system/bhttp.service 2>/dev/null | head -1)
     if [ -z "$SSH_BACKEND_PORT" ]; then
@@ -106,7 +110,7 @@ controlar_bhttp() {
     inicio=$(systemctl is-enabled bhttp 2>/dev/null)
     [ -z "$estado" ] && estado="inactivo"
     [ -z "$inicio" ] && inicio="no habilitado"
-    echo -e "\n${CYAN}--- CONTROL DEL SERVICIO BHTTP ---${NC}"
+    echo -e "\n${CYAN}--- CONTROL DEL SERVICIO PRINCIPAL BHTTP ---${NC}"
     echo -e "Estado actual: ${WHITE}$estado${NC} | Inicio automático: ${WHITE}$inicio${NC}"
     echo -e "  ${GREEN}1)${NC} Encender ahora y al iniciar la VPS"
     echo -e "  ${RED}2)${NC} Apagar ahora y evitar que arranque con la VPS"
@@ -134,12 +138,12 @@ controlar_bhttp() {
 }
 
 controlar_limitador() {
-    local opcion
+    local opcion confirmar
     echo -e "\n${CYAN}--- LIMITADOR DE CONEXIONES ---${NC}"
     if ! systemctl cat bhttp-limiter.service >/dev/null 2>&1; then
         echo -e "${YELLOW}[!] El servicio bhttp-limiter no está instalado.${NC}"
-        echo -e "Este repositorio guarda los límites de cuentas, pero no incluye el servicio que los aplica."
-        echo -e "Por eso no se puede activar desde este menú todavía."
+        echo -e "Actualiza la instalación con el instalador vigente para agregarlo."
+        echo -e "El límite empezará a aplicarse solo después de activarlo aquí."
         esperar_tecla
         return
     fi
@@ -151,7 +155,14 @@ controlar_limitador() {
     IFS= read -r opcion
     case "$opcion" in
         1)
-            if systemctl enable --now bhttp-limiter; then echo -e "${GREEN}[✓] Limitador activado.${NC}"; else echo -e "${RED}[!] No se pudo activar el limitador.${NC}"; fi
+            echo -e "${YELLOW}Al activarlo, las sesiones que excedan el límite podrán cerrarse.${NC}"
+            echo -ne "¿Continuar? [s/N]: "
+            IFS= read -r confirmar
+            if [[ "$confirmar" == "s" || "$confirmar" == "S" ]]; then
+                if systemctl enable --now bhttp-limiter; then echo -e "${GREEN}[✓] Limitador activado.${NC}"; else echo -e "${RED}[!] No se pudo activar el limitador.${NC}"; fi
+            else
+                echo -e "${DIM}No se hicieron cambios.${NC}"
+            fi
             esperar_tecla
             ;;
         2)
@@ -165,27 +176,85 @@ controlar_limitador() {
 abrir_firewall() {
     local PUERTO_FW=$1
     if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
-        ufw allow "$PUERTO_FW"/tcp >/dev/null 2>&1
+        if ! ufw status | grep -Eq "(^|[[:space:]])${PUERTO_FW}/tcp([[:space:]]|$)"; then
+            if ufw allow "$PUERTO_FW"/tcp >/dev/null 2>&1; then
+                grep -qxF "ufw:$PUERTO_FW" "$FIREWALL_DB" || echo "ufw:$PUERTO_FW" >> "$FIREWALL_DB"
+            fi
+        fi
     fi
     if command -v iptables &> /dev/null; then
-        iptables -I INPUT -p tcp --dport "$PUERTO_FW" -j ACCEPT 2>/dev/null
+        if iptables -C INPUT -p tcp --dport "$PUERTO_FW" -m comment --comment "LeoLatam-BHTTP-$PUERTO_FW" -j ACCEPT 2>/dev/null; then
+            grep -qxF "iptables:$PUERTO_FW" "$FIREWALL_DB" || echo "iptables:$PUERTO_FW" >> "$FIREWALL_DB"
+        elif ! iptables -C INPUT -p tcp --dport "$PUERTO_FW" -j ACCEPT 2>/dev/null; then
+            if iptables -I INPUT -p tcp --dport "$PUERTO_FW" -m comment --comment "LeoLatam-BHTTP-$PUERTO_FW" -j ACCEPT 2>/dev/null; then
+                grep -qxF "iptables:$PUERTO_FW" "$FIREWALL_DB" || echo "iptables:$PUERTO_FW" >> "$FIREWALL_DB"
+                command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+}
+
+puerto_ocupado() {
+    local puerto=$1
+    if command -v ss >/dev/null 2>&1; then
+        ss -H -ltn 2>/dev/null | awk -v p="$puerto" '$4 ~ (":" p "$") {ocupado=1} END {exit !ocupado}'
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$puerto" -sTCP:LISTEN >/dev/null 2>&1
+    else
+        return 2
+    fi
+}
+
+cerrar_firewall() {
+    local PUERTO_FW=$1
+    if grep -qxF "ufw:$PUERTO_FW" "$FIREWALL_DB" 2>/dev/null; then
+        if command -v ufw >/dev/null 2>&1 && ufw --force delete allow "$PUERTO_FW"/tcp >/dev/null 2>&1; then
+            sed -i "\\|^ufw:${PUERTO_FW}$|d" "$FIREWALL_DB"
+        else
+            echo -e "${YELLOW}[!] No pude retirar la regla UFW del puerto $PUERTO_FW.${NC}"
+        fi
+    fi
+    if grep -qxF "iptables:$PUERTO_FW" "$FIREWALL_DB" 2>/dev/null; then
+        local etiqueta="LeoLatam-BHTTP-$PUERTO_FW"
+        while iptables -C INPUT -p tcp --dport "$PUERTO_FW" -m comment --comment "$etiqueta" -j ACCEPT 2>/dev/null; do
+            iptables -D INPUT -p tcp --dport "$PUERTO_FW" -m comment --comment "$etiqueta" -j ACCEPT 2>/dev/null || break
+        done
+        if ! iptables -C INPUT -p tcp --dport "$PUERTO_FW" -m comment --comment "$etiqueta" -j ACCEPT 2>/dev/null; then
+            sed -i "\\|^iptables:${PUERTO_FW}$|d" "$FIREWALL_DB"
+            command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+        else
+            echo -e "${YELLOW}[!] No pude retirar la regla iptables del puerto $PUERTO_FW.${NC}"
+        fi
     fi
 }
 
 # 1. Agregar puerto adicional (Multipuertos + Firewall)
 agregar_puerto() {
+    local PYTHON_BIN
     echo -e "\n${CYAN}--- ABRIR NUEVO PUERTO BHTTP ---${NC}"
     echo -ne "${YELLOW}Introduce el puerto libre que deseas abrir (Ej: 8880): ${NC}"
     read NUEVO_PUERTO
 
-    if ! [[ "$NUEVO_PUERTO" =~ ^[0-9]+$ ]]; then
+    if ! [[ "$NUEVO_PUERTO" =~ ^[0-9]+$ ]] || [ "$NUEVO_PUERTO" -lt 1 ] || [ "$NUEVO_PUERTO" -gt 65535 ]; then
         echo -e "${RED}[!] Debes ingresar un número válido.${NC}"
         sleep 2; return
     fi
 
-    if lsof -i :"$NUEVO_PUERTO" >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v python3 2>/dev/null)
+    if [ -z "$PYTHON_BIN" ]; then
+        echo -e "${RED}[!] No se encontró python3; no se creó el servicio.${NC}"
+        sleep 2; return
+    fi
+
+    if puerto_ocupado "$NUEVO_PUERTO"; then
         echo -e "${RED}[!] El puerto $NUEVO_PUERTO ya está ocupado.${NC}"
         sleep 2; return
+    else
+        local rc=$?
+        if [ "$rc" -eq 2 ]; then
+            echo -e "${RED}[!] Se necesita ss o lsof para comprobar si el puerto está libre.${NC}"
+            sleep 2; return
+        fi
     fi
 
     cat << EOF > /etc/systemd/system/bhttp-$NUEVO_PUERTO.service
@@ -195,7 +264,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/lib/bhttp/bhttp-server.py --host 0.0.0.0 --port $NUEVO_PUERTO --backend-host 127.0.0.1 --backend-port $SSH_BACKEND_PORT
+ExecStart=$PYTHON_BIN /usr/local/lib/bhttp/bhttp-server.py --host 0.0.0.0 --port $NUEVO_PUERTO --backend-host 127.0.0.1 --backend-port $SSH_BACKEND_PORT
 Restart=always
 RestartSec=3
 User=root
@@ -206,9 +275,16 @@ EOF
 
     abrir_firewall "$NUEVO_PUERTO"
     systemctl daemon-reload
-    systemctl enable bhttp-$NUEVO_PUERTO >/dev/null 2>&1
-    systemctl start bhttp-$NUEVO_PUERTO
-    echo -e "${GREEN}[✓] ¡Puerto $NUEVO_PUERTO abierto y habilitado en Firewall!${NC}"
+    if ! systemctl enable --now "bhttp-$NUEVO_PUERTO" >/dev/null 2>&1 || ! systemctl is-active --quiet "bhttp-$NUEVO_PUERTO"; then
+        systemctl disable --now "bhttp-$NUEVO_PUERTO" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/bhttp-$NUEVO_PUERTO.service"
+        systemctl daemon-reload
+        cerrar_firewall "$NUEVO_PUERTO"
+        echo -e "${RED}[!] No se pudo iniciar el puerto $NUEVO_PUERTO; se revirtieron sus cambios.${NC}"
+        echo -e "Revisa: systemctl status bhttp-$NUEVO_PUERTO"
+        sleep 2; return
+    fi
+    echo -e "${GREEN}[✓] Puerto BHTTP $NUEVO_PUERTO activo y habilitado al iniciar la VPS.${NC}"
     sleep 2
 }
 
@@ -220,23 +296,44 @@ gestionar_puertos() {
     read PUERTO_DEL
 
     if [ -z "$PUERTO_DEL" ]; then return; fi
+    if ! [[ "$PUERTO_DEL" =~ ^[0-9]+$ ]] || [ "$PUERTO_DEL" -lt 1 ] || [ "$PUERTO_DEL" -gt 65535 ]; then
+        echo -e "${RED}[!] Ingresa un número de puerto válido.${NC}"
+        sleep 2; return
+    fi
 
     if [ -f "/etc/systemd/system/bhttp-$PUERTO_DEL.service" ]; then
         systemctl stop bhttp-$PUERTO_DEL
         systemctl disable bhttp-$PUERTO_DEL >/dev/null 2>&1
         rm -f /etc/systemd/system/bhttp-$PUERTO_DEL.service
         systemctl daemon-reload
+        cerrar_firewall "$PUERTO_DEL"
         echo -e "${GREEN}[✓] Puerto $PUERTO_DEL cerrado y eliminado.${NC}"
     elif grep -q -- "--port $PUERTO_DEL" /etc/systemd/system/bhttp.service 2>/dev/null; then
         echo -ne "${YELLOW}Ese es el puerto principal. Introduce el nuevo puerto: ${NC}"
         read REEMPLAZO
-        if [[ "$REEMPLAZO" =~ ^[0-9]+$ ]] && ! lsof -i :"$REEMPLAZO" >/dev/null 2>&1; then
+        if [[ "$REEMPLAZO" =~ ^[0-9]+$ ]] && [ "$REEMPLAZO" -ge 1 ] && [ "$REEMPLAZO" -le 65535 ] && ! puerto_ocupado "$REEMPLAZO"; then
+            local copia
+            copia=$(mktemp) || { echo -e "${RED}[!] No se pudo preparar una copia de seguridad.${NC}"; return; }
+            if ! cp /etc/systemd/system/bhttp.service "$copia"; then
+                rm -f "$copia"
+                echo -e "${RED}[!] No se pudo guardar la configuración actual.${NC}"
+                return
+            fi
             sed -i "s/--port $PUERTO_DEL/--port $REEMPLAZO/g" /etc/systemd/system/bhttp.service
             sed -i "s/puerto $PUERTO_DEL/puerto $REEMPLAZO/g" /etc/systemd/system/bhttp.service
             abrir_firewall "$REEMPLAZO"
             systemctl daemon-reload
-            systemctl restart bhttp
-            echo -e "${GREEN}[✓] Puerto principal cambiado a $REEMPLAZO y abierto en Firewall.${NC}"
+            if systemctl restart bhttp; then
+                cerrar_firewall "$PUERTO_DEL"
+                echo -e "${GREEN}[✓] Puerto principal cambiado a $REEMPLAZO.${NC}"
+            else
+                cp "$copia" /etc/systemd/system/bhttp.service
+                systemctl daemon-reload
+                systemctl restart bhttp >/dev/null 2>&1 || true
+                cerrar_firewall "$REEMPLAZO"
+                echo -e "${RED}[!] Falló el cambio; restauré el puerto anterior. Revisa systemctl status bhttp.${NC}"
+            fi
+            rm -f "$copia"
         else
             echo -e "${RED}[!] Puerto inválido u ocupado.${NC}"
         fi
@@ -259,7 +356,7 @@ crear_usuario() {
     read PASS
     echo -ne "${YELLOW}Días de duración (Ej: 30): ${NC}"
     read DIAS
-    echo -ne "${YELLOW}Límite de conexiones simultáneas (Ej: 1): ${NC}"
+    echo -ne "${YELLOW}Límite de conexiones simultáneas (Ej: 1, 0 = sin límite): ${NC}"
     read LIMITE
 
     if ! [[ "$DIAS" =~ ^[0-9]+$ ]] || ! [[ "$LIMITE" =~ ^[0-9]+$ ]]; then
@@ -297,7 +394,7 @@ gestionar_usuarios() {
     for USER in $(awk -F: '$7 == "/bin/false" {print $1}' /etc/passwd); do
         EXP=$(chage -l "$USER" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
         LIM=$(grep "^$USER:" "$DB_LIMITES" | cut -d: -f2)
-        [ -z "$LIM" ] && LIM="Sin límite"
+        if [ -z "$LIM" ] || [ "$LIM" = 0 ]; then LIM="Sin límite"; fi
         echo -e "  • Usuario: ${GREEN}$USER${NC} | Límite: ${BLUE}$LIM${NC} | Vence: ${YELLOW}$EXP${NC}"
     done
     echo -e "${CYAN}---------------------------------${NC}"
@@ -325,7 +422,7 @@ gestionar_usuarios() {
             echo -ne "${YELLOW}Escribe el nombre del usuario: ${NC}"
             read USER_EDIT
             if [ ! -z "$USER_EDIT" ] && id "$USER_EDIT" &>/dev/null; then
-                echo -ne "${YELLOW}Nuevo límite de conexiones (Ej: 2): ${NC}"
+                echo -ne "${YELLOW}Nuevo límite de conexiones (Ej: 2, 0 = sin límite): ${NC}"
                 read NUEVO_LIM
                 if [[ "$NUEVO_LIM" =~ ^[0-9]+$ ]]; then
                     sed -i "/^$USER_EDIT:/d" "$DB_LIMITES"
@@ -421,7 +518,7 @@ while true; do
     linea
     printf "  ${CYAN}[1]${NC}  Abrir un puerto BHTTP desde el menú\n"
     printf "  ${CYAN}[2]${NC}  Gestionar o cerrar puertos\n"
-    printf "  ${CYAN}[7]${NC}  Encender o apagar el servicio BHTTP\n"
+    printf "  ${CYAN}[7]${NC}  Encender o apagar el servicio principal BHTTP\n"
     printf "  ${CYAN}[8]${NC}  Activar o desactivar el limitador\n"
     printf "  ${CYAN}[9]${NC}  Reiniciar servicios\n"
     printf "  ${CYAN}[10]${NC} Ver registros en vivo\n\n"
@@ -463,8 +560,11 @@ while true; do
             echo -ne "\n${RED}¿Seguro que deseas eliminar todo el sistema BHTTP y el panel? (s/n): ${NC}"
             read CONFIRMAR
             if [[ "$CONFIRMAR" == "s" || "$CONFIRMAR" == "S" ]]; then
+                systemctl stop bhttp-limiter.service 2>/dev/null
+                systemctl disable bhttp-limiter.service 2>/dev/null
                 systemctl stop 'bhttp*' 2>/dev/null
                 systemctl disable 'bhttp*' 2>/dev/null
+                for puerto in $PUERTOS_LISTA; do cerrar_firewall "$puerto"; done
                 rm -f /etc/systemd/system/bhttp*.service
                 rm -rf /usr/local/lib/bhttp
                 rm -f /usr/local/bin/bhttp

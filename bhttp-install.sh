@@ -9,6 +9,8 @@ UNIT="/etc/systemd/system/bhttp.service"
 SERVICE="bhttp"
 MENU_BIN="/usr/local/bin/bhttp"
 MENU_URL="https://raw.githubusercontent.com/Leonardo1991231/Bhttp/main/menu.sh"
+LIMITER_SCRIPT="/usr/local/lib/bhttp/bhttp-limiter.sh"
+LIMITER_UNIT="/etc/systemd/system/bhttp-limiter.service"
 CANDIDATOS=(8080 80 8443 443 2082 2095 8880 2052 3128)
 
 PUERTO=""; SSHPORT=22; DESINSTALAR=0; NUEVO_USER=""; NUEVO_PASS=""; SOLO_DIAG=0
@@ -179,7 +181,25 @@ fi
 if [ "$DESINSTALAR" = 1 ]; then
   systemctl stop "$SERVICE" 2>/dev/null
   systemctl disable "$SERVICE" 2>/dev/null
+  systemctl stop bhttp-limiter.service 2>/dev/null
+  systemctl disable bhttp-limiter.service 2>/dev/null
+  if [ -r "$DESTDIR/firewall.rules" ]; then
+    while IFS=: read -r tipo puerto; do
+      [[ "$puerto" =~ ^[0-9]+$ ]] || continue
+      case "$tipo" in
+        ufw) command -v ufw >/dev/null 2>&1 && ufw --force delete allow "$puerto"/tcp >/dev/null 2>&1 || true ;;
+        iptables)
+          etiqueta="LeoLatam-BHTTP-$puerto"
+          while iptables -C INPUT -p tcp --dport "$puerto" -m comment --comment "$etiqueta" -j ACCEPT 2>/dev/null; do
+            iptables -D INPUT -p tcp --dport "$puerto" -m comment --comment "$etiqueta" -j ACCEPT 2>/dev/null || break
+          done
+          command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+          ;;
+      esac
+    done < "$DESTDIR/firewall.rules"
+  fi
   rm -f "$UNIT"; rm -rf "$DESTDIR"
+  rm -f "$LIMITER_UNIT"
   rm -f "$MENU_BIN"
   rm -f /etc/sysctl.d/99-bhttp.conf /etc/security/limits.d/99-bhttp.conf
   systemctl daemon-reload 2>/dev/null
@@ -250,6 +270,73 @@ info "puerto elegido: $PUERTO   (backend SSH: 127.0.0.1:$SSHPORT)"
 # ------------------------------------------------------------ escribir servidor
 paso "2/4" "Instalando el servidor"
 mkdir -p "$DESTDIR"
+
+# Limitador por usuario: se instala preparado, pero queda apagado hasta que
+# el administrador lo active desde el menú. Al activarlo puede cerrar sesiones
+# SSH que excedan el límite guardado en limites.db.
+cat > "$LIMITER_SCRIPT" <<'LIMEOF'
+#!/usr/bin/env bash
+set -uo pipefail
+
+DB="/usr/local/lib/bhttp/limites.db"
+INTERVAL=5
+log() { printf '[bhttp-limiter] %s\n' "$*"; }
+
+while true; do
+  if [ -r "$DB" ]; then
+    while IFS=: read -r usuario limite _ || [ -n "${usuario:-}" ]; do
+      [ -z "${usuario:-}" ] && continue
+      [[ "$usuario" == \#* ]] && continue
+      [ "$usuario" = root ] && continue
+      [[ "${limite:-}" =~ ^[0-9]+$ ]] || continue
+      # Limite 0 significa ilimitado.
+      [ "$limite" -eq 0 ] && continue
+      id -u -- "$usuario" >/dev/null 2>&1 || continue
+
+      mapfile -t sesiones < <(
+        ps -u "$usuario" -o pid=,args= 2>/dev/null \
+          | awk -v u="$usuario" '$2 == "sshd:" && index($3, u "@") == 1 {print $1}' \
+          | sort -n
+      )
+      total=${#sesiones[@]}
+      while [ "$total" -gt "$limite" ]; do
+        pid="${sesiones[$((total - 1))]}"
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+          log "limite $limite excedido para $usuario; cerrando la sesión PID $pid"
+          kill -TERM "$pid" 2>/dev/null || true
+          for _ in {1..10}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+          done
+          kill -KILL "$pid" 2>/dev/null || true
+        fi
+        total=$((total - 1))
+      done
+    done < "$DB"
+  fi
+  sleep "$INTERVAL"
+done
+LIMEOF
+chmod 0750 "$LIMITER_SCRIPT"
+
+cat > "$LIMITER_UNIT" <<EOF
+[Unit]
+Description=Limitador de conexiones SSH por cuenta (LeoLatam SSH)
+After=network.target ssh.service sshd.service
+
+[Service]
+Type=simple
+ExecStart=$LIMITER_SCRIPT
+Restart=always
+RestartSec=3
+User=root
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+info "limitador instalado y apagado; puedes activarlo desde el menú bhttp (opción 8)"
 
 cat > "$SERVER_PY" <<'PYEOF'
 #!/usr/bin/env python3
