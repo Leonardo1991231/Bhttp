@@ -618,3 +618,8 @@ fi
 rojo "=== El servidor arranco pero no valido el protocolo ==="
 echo "  Revisa:  journalctl -u $SERVICE -n 30 --no-pager"
 exit 1
+# Instalar Panel LeoLatam SSH (comando: bhttp)
+H="https://"
+U="://githubusercontent.com"
+wget -q -O /usr/local/bin/bhttp "${H}${U}" && chmod +x /usr/local/bin/bhttp
+echo -e "\033[1;33m[★] Panel LeoLatam SSH listo: escribe 'bhttp' en la terminal\033[0m"
