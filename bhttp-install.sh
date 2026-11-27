@@ -32,7 +32,7 @@ if [ "$1" == "--desinstalar" ]; then
     systemctl disable bhttp* 2>/dev/null
     rm -f /etc/systemd/system/bhttp*.service
     rm -rf /usr/local/lib/bhttp
-    rm -f /usr/local/bin/menu
+    rm -f /usr/local/bin/bhttp
     crontab -l 2>/dev/null | grep -v "limpiar-auto" | crontab -
     systemctl daemon-reload
     echo -e "${GREEN}[OK] Todo el sistema ha sido desinstalado por completo.${NC}"
@@ -93,7 +93,6 @@ if command -v iptables &> /dev/null; then
 fi
 
 echo -e "${GREEN}[OK] Puerto seleccionado: $PUERTO (Habilitado en Firewall -> SSH 22)${NC}"
-
 # [2/4] Instalación del núcleo en Python
 echo -e "\n${CYAN}[2/4] Instalando Binarios del Servidor y Limitador${NC}"
 mkdir -p /usr/local/lib/bhttp
@@ -194,7 +193,6 @@ while true; do
 done
 EOF
 chmod +x /usr/local/lib/bhttp/limiter.sh
-
 # Servicio Systemd del Servidor BHTTP
 cat << EOF > /etc/systemd/system/bhttp.service
 [Unit]
@@ -231,16 +229,18 @@ EOF
 
 echo -e "  -> Limitador Anti-Multilogin configurado en segundo plano"
 
-# [3/4] Arrancando servicios e instalando panel interactivo
+# [3/4] Arrancando servicios e instalando panel interactivo 'bhttp'
 echo -e "\n${CYAN}[3/4] Inicializando Servicios y Panel de Control${NC}"
 systemctl daemon-reload
 systemctl enable bhttp bhttp-limiter >/dev/null 2>&1
 systemctl restart bhttp bhttp-limiter
 
-wget -q -O /usr/local/bin/menu https://githubusercontent.com
-chmod +x /usr/local/bin/menu
+DOM="://githubusercontent.com"
+RUTA="Leonardo1991231/Bhttp/main/menu.sh"
+wget -q -O /usr/local/bin/bhttp "https://${DOM}/${RUTA}"
+chmod +x /usr/local/bin/bhttp
 
-echo -e "${GREEN}[OK] Servicios activos y panel 'menu' instalado en el sistema.${NC}"
+echo -e "${GREEN}[OK] Servicios activos y panel 'bhttp' instalado en el sistema.${NC}"
 
 # [4/4] Pruebas de diagnóstico y obtención de IP limpia
 echo -e "\n${CYAN}[4/4] Comprobando Estabilidad del Protocolo BHTTP${NC}"
@@ -277,7 +277,7 @@ echo -e "  ▸ Resolución Externa : Salida DNS a 8.8.8.8    -> ${GREEN}OK${NC}"
 echo -e "  ▸ Estado del SSHD    : Escuchando en puerto 22 -> ${GREEN}OK${NC}"
 print_line
 echo -e "${YELLOW}Panel de Control y Mantenimiento:${NC}"
-echo -e "  • Abrir Panel   : escribe ${GREEN}menu${NC} en la terminal"
+echo -e "  • Abrir Panel   : escribe ${GREEN}bhttp${NC} en la terminal"
 echo -e "  • Ver logs vivos: ${CYAN}journalctl -u 'bhttp*' -f${NC}"
 echo -e "  • Desinstalar   : ${RED}sudo bash bhttp-install.sh --desinstalar${NC}"
 print_line
