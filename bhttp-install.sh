@@ -235,7 +235,7 @@ systemctl daemon-reload
 systemctl enable bhttp bhttp-limiter >/dev/null 2>&1
 systemctl restart bhttp bhttp-limiter
 
-DOM="://githubusercontent.com"
+DOM="://raw.githubusercontent.com"
 RUTA="Leonardo1991231/Bhttp/main/menu.sh"
 wget -q -O /usr/local/bin/bhttp "https://${DOM}/${RUTA}"
 chmod +x /usr/local/bin/bhttp
