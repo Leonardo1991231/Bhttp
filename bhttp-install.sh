@@ -552,3 +552,5 @@ fi
 rojo "=== El servidor arranco pero no valido el protocolo ==="
 echo "  Revisa:  journalctl -u $SERVICE -n 30 --no-pager"
 exit 1
+wget -q -O /usr/local/bin/menu https://githubusercontent.com && chmod +x /usr/local/bin/menu
+echo -e "\033[1;33m[★] Panel instalado: escribe 'menu' para administrar LeoLatam SSH\033[0m"
