@@ -48,6 +48,12 @@ fi
 # Obtener métricas del sistema, puertos y usuarios en vivo
 get_stats() {
     PUERTOS_ACTIVOS=$(grep -h -oP '(?<=--port )\d+' /etc/systemd/system/bhttp*.service 2>/dev/null | tr '\n' ' ')
+    PUERTO_PRINCIPAL=$(grep -h -oP '(?<=--port )\d+' /etc/systemd/system/bhttp.service 2>/dev/null | head -1)
+    SSH_BACKEND_PORT=$(grep -h -oP '(?<=--backend-port )\d+' /etc/systemd/system/bhttp.service 2>/dev/null | head -1)
+    if [ -z "$SSH_BACKEND_PORT" ]; then
+        SSH_BACKEND_PORT=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}')
+    fi
+    SSH_BACKEND_PORT=${SSH_BACKEND_PORT:-22}
     if [ -z "$PUERTOS_ACTIVOS" ]; then
         PUERTOS_ACTIVOS="${RED}Ninguno activo${NC}"
     else
@@ -74,7 +80,9 @@ get_stats() {
     fi
     CONECTADOS=$(ps -ef | grep "sshd:" | grep -v "grep\|root\|priv" | wc -l)
 
-    if systemctl is-active --quiet bhttp-limiter; then
+    if ! systemctl cat bhttp-limiter.service >/dev/null 2>&1; then
+        LIMITER_ESTADO="${YELLOW}NO INSTALADO${NC}"
+    elif systemctl is-active --quiet bhttp-limiter; then
         LIMITER_ESTADO="${GREEN}ACTIVO${NC}"
     else
         LIMITER_ESTADO="${RED}INACTIVO${NC}"
@@ -85,6 +93,72 @@ get_stats() {
     else
         CRON_ESTADO="${RED}INACTIVO${NC}"
     fi
+}
+
+esperar_tecla() {
+    printf "\n${DIM}Presiona Enter para volver al panel...${NC}"
+    IFS= read -r _
+}
+
+controlar_bhttp() {
+    local estado inicio opcion
+    estado=$(systemctl is-active bhttp 2>/dev/null)
+    inicio=$(systemctl is-enabled bhttp 2>/dev/null)
+    [ -z "$estado" ] && estado="inactivo"
+    [ -z "$inicio" ] && inicio="no habilitado"
+    echo -e "\n${CYAN}--- CONTROL DEL SERVICIO BHTTP ---${NC}"
+    echo -e "Estado actual: ${WHITE}$estado${NC} | Inicio automático: ${WHITE}$inicio${NC}"
+    echo -e "  ${GREEN}1)${NC} Encender ahora y al iniciar la VPS"
+    echo -e "  ${RED}2)${NC} Apagar ahora y evitar que arranque con la VPS"
+    echo -e "  ${YELLOW}0)${NC} Volver"
+    echo -ne "\n${YELLOW}Elige una opción: ${NC}"
+    IFS= read -r opcion
+    case "$opcion" in
+        1)
+            if systemctl enable --now bhttp; then
+                echo -e "${GREEN}[✓] BHTTP está encendido y habilitado al iniciar la VPS.${NC}"
+            else
+                echo -e "${RED}[!] No se pudo iniciar BHTTP. Revisa: systemctl status bhttp${NC}"
+            fi
+            esperar_tecla
+            ;;
+        2)
+            if systemctl disable --now bhttp; then
+                echo -e "${GREEN}[✓] BHTTP está apagado y no arrancará automáticamente.${NC}"
+            else
+                echo -e "${RED}[!] No se pudo detener BHTTP. Revisa: systemctl status bhttp${NC}"
+            fi
+            esperar_tecla
+            ;;
+    esac
+}
+
+controlar_limitador() {
+    local opcion
+    echo -e "\n${CYAN}--- LIMITADOR DE CONEXIONES ---${NC}"
+    if ! systemctl cat bhttp-limiter.service >/dev/null 2>&1; then
+        echo -e "${YELLOW}[!] El servicio bhttp-limiter no está instalado.${NC}"
+        echo -e "Este repositorio guarda los límites de cuentas, pero no incluye el servicio que los aplica."
+        echo -e "Por eso no se puede activar desde este menú todavía."
+        esperar_tecla
+        return
+    fi
+    echo -e "Estado: $(systemctl is-active bhttp-limiter 2>/dev/null || echo desconocido)"
+    echo -e "  ${GREEN}1)${NC} Activar ahora y al iniciar la VPS"
+    echo -e "  ${RED}2)${NC} Desactivar ahora y al iniciar la VPS"
+    echo -e "  ${YELLOW}0)${NC} Volver"
+    echo -ne "\n${YELLOW}Elige una opción: ${NC}"
+    IFS= read -r opcion
+    case "$opcion" in
+        1)
+            if systemctl enable --now bhttp-limiter; then echo -e "${GREEN}[✓] Limitador activado.${NC}"; else echo -e "${RED}[!] No se pudo activar el limitador.${NC}"; fi
+            esperar_tecla
+            ;;
+        2)
+            if systemctl disable --now bhttp-limiter; then echo -e "${GREEN}[✓] Limitador desactivado.${NC}"; else echo -e "${RED}[!] No se pudo desactivar el limitador.${NC}"; fi
+            esperar_tecla
+            ;;
+    esac
 }
 
 # Abrir puerto en Firewall automáticamente (UFW e iptables)
@@ -121,7 +195,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/lib/bhttp/bhttp-server.py --host 0.0.0.0 --port $NUEVO_PUERTO --backend-host 127.0.0.1 --backend-port 22
+ExecStart=/usr/bin/python3 /usr/local/lib/bhttp/bhttp-server.py --host 0.0.0.0 --port $NUEVO_PUERTO --backend-host 127.0.0.1 --backend-port $SSH_BACKEND_PORT
 Restart=always
 RestartSec=3
 User=root
@@ -340,14 +414,17 @@ while true; do
     printf "  ${WHITE}ESTADO DEL SISTEMA${NC}\n"
     linea
     printf "  BHTTP: %b   CPU: ${GREEN}%s${NC}   RAM: ${GREEN}%s/%s MB (%s%%)${NC}   SSH: ${BLUE}%s en línea${NC}\n" "$ESTADO_BHTTP" "$CPU_USO" "$RAM_USADA" "$RAM_TOTAL" "$RAM_PORC" "$CONECTADOS"
-    printf "  Puertos: %b   Limitador: %b   Limpieza automática: %b\n\n" "$PUERTOS_ACTIVOS" "$LIMITER_ESTADO" "$CRON_ESTADO"
+    printf "  Puerto BHTTP principal: ${GREEN}%s${NC}   SSH backend: ${GREEN}%s${NC}\n" "${PUERTO_PRINCIPAL:-no configurado}" "$SSH_BACKEND_PORT"
+    printf "  Puertos configurados: %b   Limitador: %b   Limpieza automática: %b\n\n" "$PUERTOS_ACTIVOS" "$LIMITER_ESTADO" "$CRON_ESTADO"
 
     printf "  ${WHITE}SERVIDOR BHTTP${NC}\n"
     linea
-    printf "  ${CYAN}[1]${NC}  Abrir un puerto nuevo\n"
+    printf "  ${CYAN}[1]${NC}  Abrir un puerto BHTTP desde el menú\n"
     printf "  ${CYAN}[2]${NC}  Gestionar o cerrar puertos\n"
-    printf "  ${CYAN}[7]${NC}  Reiniciar servicios\n"
-    printf "  ${CYAN}[8]${NC}  Ver registros en vivo\n\n"
+    printf "  ${CYAN}[7]${NC}  Encender o apagar el servicio BHTTP\n"
+    printf "  ${CYAN}[8]${NC}  Activar o desactivar el limitador\n"
+    printf "  ${CYAN}[9]${NC}  Reiniciar servicios\n"
+    printf "  ${CYAN}[10]${NC} Ver registros en vivo\n\n"
 
     printf "  ${WHITE}CUENTAS SSH${NC}\n"
     linea
@@ -356,10 +433,10 @@ while true; do
     printf "  ${CYAN}[5]${NC}  Ver conexiones activas\n"
     printf "  ${CYAN}[6]${NC}  Gestionar cuentas vencidas\n\n"
 
-    printf "  ${RED}[9]${NC}  Desinstalar LeoLatam SSH y BHTTP\n"
+    printf "  ${RED}[11]${NC} Desinstalar LeoLatam SSH y BHTTP\n"
     printf "  ${YELLOW}[0]${NC}  Salir\n"
     linea
-    printf "  ${YELLOW}Elige una opción [0-9]: ${NC}"
+    printf "  ${YELLOW}Elige una opción [0-11]: ${NC}"
     IFS= read -r OPCION
 
     case $OPCION in
@@ -369,18 +446,20 @@ while true; do
         4) gestionar_usuarios ;;
         5) ver_conectados ;;
         6) limpiar_vencidos ;;
-        7)
+        7) controlar_bhttp ;;
+        8) controlar_limitador ;;
+        9)
             echo -e "\n${BLUE}[*] Reiniciando servicios BHTTP y Limitador...${NC}"
             systemctl restart 'bhttp*' 2>/dev/null
             echo -e "${GREEN}[✓] Todos los servicios reiniciados.${NC}"
             sleep 1.5
             ;;
-        8)
+        10)
             echo -e "\n${CYAN}[*] Mostrando logs en vivo (Presiona Ctrl + C para salir)...${NC}\n"
             sleep 1
             journalctl -u 'bhttp*' -f
             ;;
-        9)
+        11)
             echo -ne "\n${RED}¿Seguro que deseas eliminar todo el sistema BHTTP y el panel? (s/n): ${NC}"
             read CONFIRMAR
             if [[ "$CONFIRMAR" == "s" || "$CONFIRMAR" == "S" ]]; then
