@@ -5,15 +5,21 @@
 # Comando de inicio: bhttp
 # ==========================================
 
-RED="\033[0;31m"
-GREEN="\033[0;32m"
+RED="\033[1;31m"
+GREEN="\033[1;32m"
 YELLOW="\033[1;33m"
-BLUE="\033[0;34m"
-PURPLE="\033[0;35m"
-CYAN="\033[0;36m"
+BLUE="\033[1;34m"
+PURPLE="\033[1;35m"
+CYAN="\033[1;36m"
+DIM="\033[2m"
+WHITE="\033[1;37m"
 NC="\033[0m"
 
+linea() { printf "${CYAN}%s${NC}\n" "──────────────────────────────────────────────────────────────────────"; }
+
 DB_LIMITES="/usr/local/lib/bhttp/limites.db"
+CPU_PREV_TOTAL=""
+CPU_PREV_IDLE=""
 mkdir -p /usr/local/lib/bhttp
 touch "$DB_LIMITES"
 
@@ -48,11 +54,24 @@ get_stats() {
         PUERTOS_ACTIVOS="${GREEN}$PUERTOS_ACTIVOS${NC}"
     fi
 
-    RAM_TOTAL=$(free -m | awk '/Mem:/ {print $2}')
-    RAM_USADA=$(free -m | awk '/Mem:/ {print $3}')
-    RAM_PORC=$((RAM_USADA * 100 / RAM_TOTAL))
+    read -r RAM_TOTAL RAM_USADA < <(free -m 2>/dev/null | awk '/Mem:/ {print $2, $3}')
+    RAM_TOTAL=${RAM_TOTAL:-0}; RAM_USADA=${RAM_USADA:-0}
+    if [ "$RAM_TOTAL" -gt 0 ]; then RAM_PORC=$((RAM_USADA * 100 / RAM_TOTAL)); else RAM_PORC=0; fi
 
-    CPU_USO=$(top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8"%"}')
+    local cpu_label cpu_user cpu_nice cpu_system cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal cpu_total cpu_idle_all
+    if read -r cpu_label cpu_user cpu_nice cpu_system cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal _ < /proc/stat; then
+        cpu_total=$((cpu_user + cpu_nice + cpu_system + cpu_idle + cpu_iowait + cpu_irq + cpu_softirq + cpu_steal))
+        cpu_idle_all=$((cpu_idle + cpu_iowait))
+        if [ -n "$CPU_PREV_TOTAL" ] && [ "$cpu_total" -gt "$CPU_PREV_TOTAL" ]; then
+            CPU_USO="$(( (cpu_total - CPU_PREV_TOTAL - cpu_idle_all + CPU_PREV_IDLE) * 100 / (cpu_total - CPU_PREV_TOTAL) ))%"
+        else
+            CPU_USO="N/D"
+        fi
+        CPU_PREV_TOTAL="$cpu_total"
+        CPU_PREV_IDLE="$cpu_idle_all"
+    else
+        CPU_USO="N/D"
+    fi
     CONECTADOS=$(ps -ef | grep "sshd:" | grep -v "grep\|root\|priv" | wc -l)
 
     if systemctl is-active --quiet bhttp-limiter; then
@@ -309,32 +328,39 @@ limpiar_vencidos() {
 # Bucle principal
 while true; do
     get_stats
-    clear
-    echo -e "${CYAN}=====================================================================${NC}"
-    echo -e "${PURPLE}"'  _               _           _                     ____ ____ _   _ '
-    echo -e ' | |    ___  ___ | |    __ _ | |_ __ _ _ __ ___    / ___/ ___| | | |'
-    echo -e ' | |   / _ \/ _ \| |   / _` || __/ _` | '\''_ ` _ \   \___ \___ \ |_| |'
-    echo -e ' | |__|  __/ (_) | |__| (_| || || (_| | | | | | |   ___) |__) |  _  |'
-    echo -e ' |_____\___|\___/|_____\__,_| \__\__,_|_| |_| |_|  |____/____/|_| |_|'"${NC}"
-    echo -e "                     ${YELLOW}Panel Oficial BHTTP - VPS${NC}"
-    echo -e "${CYAN}=====================================================================${NC}"
-    echo -e "  ${YELLOW}CPU:${NC} ${GREEN}$CPU_USO${NC}  |  ${YELLOW}RAM:${NC} ${GREEN}${RAM_USADA}MB/${RAM_TOTAL}MB (${RAM_PORC}%)${NC}  |  ${YELLOW}En Vivo:${NC} ${BLUE}$CONECTADOS online${NC}"
-    echo -e "  ${YELLOW}Puertos BHTTP Activos :${NC} $PUERTOS_ACTIVOS"
-    echo -e "  ${YELLOW}Limitador Multilogin  :${NC} $LIMITER_ESTADO  |  ${YELLOW}Auto-Limpieza:${NC} $CRON_ESTADO"
-    echo -e "${CYAN}---------------------------------------------------------------------${NC}"
-    echo -e "  ${GREEN}1)${NC} Abrir Nuevo Puerto BHTTP (Multipuertos + Firewall)"
-    echo -e "  ${GREEN}2)${NC} Cambiar Puerto Principal / Cerrar un Puerto"
-    echo -e "  ${GREEN}3)${NC} Crear Usuario SSH (Con vencimiento y límite)"
-    echo -e "  ${GREEN}4)${NC} Gestionar Usuarios SSH (Ver / Cambiar Límite / Eliminar)"
-    echo -e "  ${GREEN}5)${NC} Monitor de Usuarios Conectados en Vivo"
-    echo -e "  ${GREEN}6)${NC} Limpiador de Usuarios Vencidos (Manual / Automático)"
-    echo -e "  ${GREEN}7)${NC} Reiniciar Servicios BHTTP y Limitador"
-    echo -e "  ${GREEN}8)${NC} Ver Logs del Túnel en Vivo"
-    echo -e "  ${RED}9)${NC} Desinstalar LeoLatam SSH y BHTTP"
-    echo -e "  ${YELLOW}0)${NC} Salir del Panel"
-    echo -e "${CYAN}=====================================================================${NC}"
-    echo -ne "${YELLOW}Selecciona una opción [0-9]: ${NC}"
-    read OPCION
+    if [ -t 1 ] && [ -n "${TERM:-}" ]; then clear; fi
+    printf "${BLUE}╔════════════════════════════════════════════════════════════════════╗${NC}\n"
+    printf "${BLUE}║${NC}  ${CYAN}LEOLATAM SSH${NC}  ${DIM}·${NC}  ${WHITE}PANEL DE ADMINISTRACIÓN BHTTP${NC}                   ${BLUE}║${NC}\n"
+    printf "${BLUE}╚════════════════════════════════════════════════════════════════════╝${NC}\n"
+    printf "  ${DIM}Servidor seguro · Gestión de puertos y cuentas SSH${NC}\n\n"
+
+    ESTADO_BHTTP=$(systemctl is-active bhttp 2>/dev/null)
+    [ -z "$ESTADO_BHTTP" ] && ESTADO_BHTTP="inactivo"
+    if [ "$ESTADO_BHTTP" = "active" ]; then ESTADO_BHTTP="${GREEN}ACTIVO${NC}"; else ESTADO_BHTTP="${RED}INACTIVO${NC}"; fi
+    printf "  ${WHITE}ESTADO DEL SISTEMA${NC}\n"
+    linea
+    printf "  BHTTP: %b   CPU: ${GREEN}%s${NC}   RAM: ${GREEN}%s/%s MB (%s%%)${NC}   SSH: ${BLUE}%s en línea${NC}\n" "$ESTADO_BHTTP" "$CPU_USO" "$RAM_USADA" "$RAM_TOTAL" "$RAM_PORC" "$CONECTADOS"
+    printf "  Puertos: %b   Limitador: %b   Limpieza automática: %b\n\n" "$PUERTOS_ACTIVOS" "$LIMITER_ESTADO" "$CRON_ESTADO"
+
+    printf "  ${WHITE}SERVIDOR BHTTP${NC}\n"
+    linea
+    printf "  ${CYAN}[1]${NC}  Abrir un puerto nuevo\n"
+    printf "  ${CYAN}[2]${NC}  Gestionar o cerrar puertos\n"
+    printf "  ${CYAN}[7]${NC}  Reiniciar servicios\n"
+    printf "  ${CYAN}[8]${NC}  Ver registros en vivo\n\n"
+
+    printf "  ${WHITE}CUENTAS SSH${NC}\n"
+    linea
+    printf "  ${CYAN}[3]${NC}  Crear una cuenta\n"
+    printf "  ${CYAN}[4]${NC}  Ver, editar o eliminar cuentas\n"
+    printf "  ${CYAN}[5]${NC}  Ver conexiones activas\n"
+    printf "  ${CYAN}[6]${NC}  Gestionar cuentas vencidas\n\n"
+
+    printf "  ${RED}[9]${NC}  Desinstalar LeoLatam SSH y BHTTP\n"
+    printf "  ${YELLOW}[0]${NC}  Salir\n"
+    linea
+    printf "  ${YELLOW}Elige una opción [0-9]: ${NC}"
+    IFS= read -r OPCION
 
     case $OPCION in
         1) agregar_puerto ;;

@@ -189,26 +189,25 @@ fi
 
 banner
 paso "0/4" "Preparando el comando global bhttp"
-TMP_MENU="$(mktemp)" || { rojo "No pude crear un archivo temporal para el menú."; exit 1; }
+TMP_MENU="$(mktemp 2>/dev/null)" || TMP_MENU=""
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-if [ -n "$SCRIPT_DIR" ] && [ -r "$SCRIPT_DIR/menu.sh" ]; then
-  cp "$SCRIPT_DIR/menu.sh" "$TMP_MENU" || { rm -f "$TMP_MENU"; rojo "No se pudo preparar el menú local."; exit 1; }
-elif command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$MENU_URL" -o "$TMP_MENU" || { rm -f "$TMP_MENU"; rojo "No se pudo descargar el menú desde GitHub: $MENU_URL"; exit 1; }
-elif command -v wget >/dev/null 2>&1; then
-  wget -q -O "$TMP_MENU" "$MENU_URL" || { rm -f "$TMP_MENU"; rojo "No se pudo descargar el menú desde GitHub: $MENU_URL"; exit 1; }
+MENU_PREPARADO=0
+if [ -n "$TMP_MENU" ]; then
+  if [ -n "$SCRIPT_DIR" ] && [ -r "$SCRIPT_DIR/menu.sh" ]; then
+    cp "$SCRIPT_DIR/menu.sh" "$TMP_MENU" && MENU_PREPARADO=1
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 2 --max-time 5 "$MENU_URL" -o "$TMP_MENU" && MENU_PREPARADO=1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --timeout=3 --tries=1 -O "$TMP_MENU" "$MENU_URL" && MENU_PREPARADO=1
+  fi
+fi
+if [ "$MENU_PREPARADO" = 1 ] && bash -n "$TMP_MENU" && install -m 0755 "$TMP_MENU" "$MENU_BIN"; then
+  verde "Comando global instalado: escribe bhttp para abrir el menú LeoLatam SSH."
 else
-  rm -f "$TMP_MENU"
-  rojo "Se necesita curl o wget para descargar el menú de LeoLatam SSH."
-  exit 1
+  rojo "No pude instalar el menú ahora; la instalación del servidor continuará."
+  info "Para instalar el comando bhttp más tarde, vuelve a ejecutar el instalador."
 fi
-if ! bash -n "$TMP_MENU"; then
-  rm -f "$TMP_MENU"
-  rojo "El menú descargado no pasó la comprobación de sintaxis; no se instaló."
-  exit 1
-fi
-install -m 0755 "$TMP_MENU" "$MENU_BIN" && rm -f "$TMP_MENU" || { rm -f "$TMP_MENU"; rojo "No se pudo instalar el comando $MENU_BIN."; exit 1; }
-verde "Comando global instalado: escribe bhttp para abrir el menú LeoLatam SSH."
+[ -z "$TMP_MENU" ] || rm -f "$TMP_MENU"
 
 echo "=== Instalar servidor BHTTP propio ==="
 
@@ -622,27 +621,29 @@ IP="$(command -v curl >/dev/null 2>&1 && curl -fsS --max-time 5 https://api.ipif
 [ -z "$IP" ] && IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 
 if echo "$VERIF" | grep -q HANDSHAKE_OK; then
-  verde "=== LISTO: el servidor BHTTP responde ==="
   echo
-  echo "  En la app pon:"
-  echo "     host      : ${IP:-<la ip de tu vps>}"
-  echo "     puerto    : $PUERTO"
-  echo "     protocolo : bhttp"
-  echo "     (sin TLS; usa el usuario/clave SSH de esta VPS)"
-  echo
+  printf '\033[1;34m╔══════════════════════════════════════════════╗\033[0m\n'
+  printf '\033[1;34m║\033[0m        \033[1;36mBHTTP INSTALADO Y ACTIVO\033[0m              \033[1;34m║\033[0m\n'
+  printf '\033[1;34m╚══════════════════════════════════════════════╝\033[0m\n'
+  printf '  \033[1;37mDATOS PARA LA APP\033[0m\n'
+  printf '  Host       : \033[1;36m%s\033[0m\n' "${IP:-<la ip de tu vps>}"
+  printf '  Puerto     : \033[1;36m%s\033[0m\n' "$PUERTO"
+  printf '  Protocolo  : \033[1;36mbhttp\033[0m\n'
+  printf '  Seguridad  : sin TLS; usa el usuario y clave SSH de esta VPS\n\n'
   if echo "$VERIF" | grep -q TUNEL_OK; then
-    verde "  Tunel al SSH verificado de punta a punta."
+    verde "Túnel SSH verificado de punta a punta."
   else
-    rojo "  El protocolo va, pero el SSH local no respondio."
+    rojo "El protocolo responde, pero el SSH local no respondió."
     echo "  Comprueba que el SSH escuche en el puerto $SSHPORT:  systemctl status ssh"
     echo "  Si tu SSH usa otro puerto:  sudo bash $0 --ssh-puerto <n> --puerto $PUERTO"
   fi
   echo
   diagnostico_ssh
   echo
-  echo "  Gestion:  systemctl status $SERVICE | restart | stop"
-  echo "  Log en vivo (util si el tunel cae al navegar):  journalctl -u $SERVICE -f"
-  echo "  Quitar :  sudo bash $0 --desinstalar"
+  printf '\n  \033[1;37mGESTIÓN\033[0m\n'
+  printf '  Estado / reinicio : systemctl status %s  |  systemctl restart %s\n' "$SERVICE" "$SERVICE"
+  printf '  Registros en vivo : journalctl -u %s -f\n' "$SERVICE"
+  printf '  Desinstalar       : sudo bash %s --desinstalar\n' "$0"
   exit 0
 fi
 
