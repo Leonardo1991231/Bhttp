@@ -13,6 +13,10 @@ PURPLE="\033[0;35m"
 CYAN="\033[0;36m"
 NC="\033[0m"
 
+DB_LIMITES="/usr/local/lib/bhttp/limites.db"
+mkdir -p /usr/local/lib/bhttp
+touch "$DB_LIMITES"
+
 if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}[ERROR] Ejecuta el panel como root (sudo menu).${NC}"
   exit 1
@@ -28,6 +32,7 @@ if [ "$1" == "--limpiar-auto" ]; then
             if [ ! -z "$EXP_SEC" ] && [ "$EXP_SEC" -lt "$HOY" ]; then
                 pkill -u "$USER" 2>/dev/null
                 userdel -f "$USER" 2>/dev/null
+                sed -i "/^$USER:/d" "$DB_LIMITES" 2>/dev/null
             fi
         fi
     done
@@ -49,6 +54,12 @@ get_stats() {
 
     CPU_USO=$(top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8"%"}')
     CONECTADOS=$(ps -ef | grep "sshd:" | grep -v "grep\|root\|priv" | wc -l)
+
+    if systemctl is-active --quiet bhttp-limiter; then
+        LIMITER_ESTADO="${GREEN}ACTIVO${NC}"
+    else
+        LIMITER_ESTADO="${RED}INACTIVO${NC}"
+    fi
 
     if crontab -l 2>/dev/null | grep -q "limpiar-auto"; then
         CRON_ESTADO="${GREEN}ACTIVO (03:00 AM)${NC}"
@@ -141,8 +152,7 @@ gestionar_puertos() {
     fi
     sleep 2
 }
-
-# 3. Crear usuario SSH con días de vencimiento
+# 3. Crear usuario SSH con días de vencimiento y límite de conexiones
 crear_usuario() {
     echo -e "\n${CYAN}--- CREAR CUENTA SSH ---${NC}"
     echo -ne "${YELLOW}Nombre de usuario: ${NC}"
@@ -156,9 +166,11 @@ crear_usuario() {
     read PASS
     echo -ne "${YELLOW}Días de duración (Ej: 30): ${NC}"
     read DIAS
+    echo -ne "${YELLOW}Límite de conexiones simultáneas (Ej: 1): ${NC}"
+    read LIMITE
 
-    if ! [[ "$DIAS" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}[!] Los días deben ser un número.${NC}"
+    if ! [[ "$DIAS" =~ ^[0-9]+$ ]] || ! [[ "$LIMITE" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}[!] Los días y el límite deben ser números válidos.${NC}"
         sleep 2; return
     fi
 
@@ -168,6 +180,10 @@ crear_usuario() {
     useradd -M -s /bin/false -e "$FECHA_EXP" "$USUARIO"
     echo "$USUARIO:$PASS" | chpasswd
 
+    # Guardar límite en la base de datos del limitador
+    sed -i "/^$USUARIO:/d" "$DB_LIMITES"
+    echo "$USUARIO:$LIMITE" >> "$DB_LIMITES"
+
     IP_VPS=$(wget -qO- ifconfig.me || curl -s ifconfig.me)
     echo -e "\n${GREEN}=========================================${NC}"
     echo -e "${GREEN}   [✓] CUENTA CREADA - LeoLatam SSH      ${NC}"
@@ -175,33 +191,62 @@ crear_usuario() {
     echo -e "  ${BLUE}Host / IP   :${NC} $IP_VPS"
     echo -e "  ${BLUE}Usuario     :${NC} $USUARIO"
     echo -e "  ${BLUE}Contraseña  :${NC} $PASS"
+    echo -e "  ${BLUE}Conexiones  :${NC} Máximo $LIMITE dispositivo(s)"
     echo -e "  ${BLUE}Vence el    :${NC} $FECHA_EXP ($DIAS días)"
     echo -e "${GREEN}=========================================${NC}"
     echo -ne "\nPresiona Enter para continuar..."
     read
 }
 
-# 4. Ver y eliminar usuarios SSH
+# 4. Ver, cambiar límite o eliminar usuarios SSH
 gestionar_usuarios() {
     echo -e "\n${CYAN}--- USUARIOS SSH REGISTRADOS ---${NC}"
     for USER in $(awk -F: '$7 == "/bin/false" {print $1}' /etc/passwd); do
         EXP=$(chage -l "$USER" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
-        echo -e "  • Usuario: ${GREEN}$USER${NC} | Vence: ${YELLOW}$EXP${NC}"
+        LIM=$(grep "^$USER:" "$DB_LIMITES" | cut -d: -f2)
+        [ -z "$LIM" ] && LIM="Sin límite"
+        echo -e "  • Usuario: ${GREEN}$USER${NC} | Límite: ${BLUE}$LIM${NC} | Vence: ${YELLOW}$EXP${NC}"
     done
     echo -e "${CYAN}---------------------------------${NC}"
-    echo -ne "${YELLOW}Escribe el usuario a eliminar (o Enter para volver): ${NC}"
-    read USER_DEL
+    echo -e "  ${GREEN}1)${NC} Eliminar un usuario"
+    echo -e "  ${GREEN}2)${NC} Cambiar límite de conexiones de un usuario"
+    echo -e "  ${YELLOW}0)${NC} Volver"
+    echo -ne "\n${YELLOW}Elige una opción: ${NC}"
+    read SUB_USER
 
-    if [ ! -z "$USER_DEL" ]; then
-        if id "$USER_DEL" &>/dev/null; then
-            pkill -u "$USER_DEL" 2>/dev/null
-            userdel -f "$USER_DEL" 2>/dev/null
-            echo -e "${GREEN}[✓] Usuario $USER_DEL eliminado.${NC}"
-        else
-            echo -e "${RED}[!] El usuario no existe.${NC}"
-        fi
-        sleep 2
-    fi
+    case $SUB_USER in
+        1)
+            echo -ne "${YELLOW}Escribe el usuario a eliminar: ${NC}"
+            read USER_DEL
+            if [ ! -z "$USER_DEL" ] && id "$USER_DEL" &>/dev/null; then
+                pkill -u "$USER_DEL" 2>/dev/null
+                userdel -f "$USER_DEL" 2>/dev/null
+                sed -i "/^$USER_DEL:/d" "$DB_LIMITES"
+                echo -e "${GREEN}[✓] Usuario $USER_DEL eliminado por completo.${NC}"
+            else
+                echo -e "${RED}[!] Usuario no encontrado.${NC}"
+            fi
+            sleep 2
+            ;;
+        2)
+            echo -ne "${YELLOW}Escribe el nombre del usuario: ${NC}"
+            read USER_EDIT
+            if [ ! -z "$USER_EDIT" ] && id "$USER_EDIT" &>/dev/null; then
+                echo -ne "${YELLOW}Nuevo límite de conexiones (Ej: 2): ${NC}"
+                read NUEVO_LIM
+                if [[ "$NUEVO_LIM" =~ ^[0-9]+$ ]]; then
+                    sed -i "/^$USER_EDIT:/d" "$DB_LIMITES"
+                    echo "$USER_EDIT:$NUEVO_LIM" >> "$DB_LIMITES"
+                    echo -e "${GREEN}[✓] Límite de $USER_EDIT actualizado a $NUEVO_LIM dispositivo(s).${NC}"
+                else
+                    echo -e "${RED}[!] Número inválido.${NC}"
+                fi
+            else
+                echo -e "${RED}[!] Usuario no encontrado.${NC}"
+            fi
+            sleep 2
+            ;;
+    esac
 }
 # 5. Monitor de usuarios conectados en vivo
 ver_conectados() {
@@ -239,6 +284,7 @@ limpiar_vencidos() {
                     if [ ! -z "$EXP_SEC" ] && [ "$EXP_SEC" -lt "$HOY" ]; then
                         pkill -u "$USER" 2>/dev/null
                         userdel -f "$USER" 2>/dev/null
+                        sed -i "/^$USER:/d" "$DB_LIMITES" 2>/dev/null
                         echo -e "  ${RED}[-] Eliminado:${NC} $USER (Venció el $EXP_STR)"
                         ELIMINADOS=$((ELIMINADOS + 1))
                     fi
@@ -274,15 +320,15 @@ while true; do
     echo -e "${CYAN}=====================================================================${NC}"
     echo -e "  ${YELLOW}CPU:${NC} ${GREEN}$CPU_USO${NC}  |  ${YELLOW}RAM:${NC} ${GREEN}${RAM_USADA}MB/${RAM_TOTAL}MB (${RAM_PORC}%)${NC}  |  ${YELLOW}En Vivo:${NC} ${BLUE}$CONECTADOS online${NC}"
     echo -e "  ${YELLOW}Puertos BHTTP Activos :${NC} $PUERTOS_ACTIVOS"
-    echo -e "  ${YELLOW}Auto-Limpieza Cuentas :${NC} $CRON_ESTADO"
+    echo -e "  ${YELLOW}Limitador Multilogin  :${NC} $LIMITER_ESTADO  |  ${YELLOW}Auto-Limpieza:${NC} $CRON_ESTADO"
     echo -e "${CYAN}---------------------------------------------------------------------${NC}"
     echo -e "  ${GREEN}1)${NC} Abrir Nuevo Puerto BHTTP (Multipuertos + Firewall)"
     echo -e "  ${GREEN}2)${NC} Cambiar Puerto Principal / Cerrar un Puerto"
-    echo -e "  ${GREEN}3)${NC} Crear Usuario SSH (Con vencimiento)"
-    echo -e "  ${GREEN}4)${NC} Ver / Eliminar Usuarios SSH"
+    echo -e "  ${GREEN}3)${NC} Crear Usuario SSH (Con vencimiento y límite)"
+    echo -e "  ${GREEN}4)${NC} Gestionar Usuarios SSH (Ver / Cambiar Límite / Eliminar)"
     echo -e "  ${GREEN}5)${NC} Monitor de Usuarios Conectados en Vivo"
     echo -e "  ${GREEN}6)${NC} Limpiador de Usuarios Vencidos (Manual / Automático)"
-    echo -e "  ${GREEN}7)${NC} Reiniciar Todos los Servicios BHTTP"
+    echo -e "  ${GREEN}7)${NC} Reiniciar Servicios BHTTP y Limitador"
     echo -e "  ${GREEN}8)${NC} Ver Logs del Túnel en Vivo"
     echo -e "  ${RED}9)${NC} Desinstalar LeoLatam SSH y BHTTP"
     echo -e "  ${YELLOW}0)${NC} Salir del Panel"
@@ -298,9 +344,9 @@ while true; do
         5) ver_conectados ;;
         6) limpiar_vencidos ;;
         7)
-            echo -e "\n${BLUE}[*] Reiniciando servicios BHTTP...${NC}"
-            systemctl restart bhttp* 2>/dev/null
-            echo -e "${GREEN}[✓] Todos los puertos reiniciados.${NC}"
+            echo -e "\n${BLUE}[*] Reiniciando servicios BHTTP y Limitador...${NC}"
+            systemctl restart 'bhttp*' 2>/dev/null
+            echo -e "${GREEN}[✓] Todos los servicios reiniciados.${NC}"
             sleep 1.5
             ;;
         8)
@@ -312,8 +358,8 @@ while true; do
             echo -ne "\n${RED}¿Seguro que deseas eliminar todo el sistema BHTTP y el menú? (s/n): ${NC}"
             read CONFIRMAR
             if [[ "$CONFIRMAR" == "s" || "$CONFIRMAR" == "S" ]]; then
-                systemctl stop bhttp* 2>/dev/null
-                systemctl disable bhttp* 2>/dev/null
+                systemctl stop 'bhttp*' 2>/dev/null
+                systemctl disable 'bhttp*' 2>/dev/null
                 rm -f /etc/systemd/system/bhttp*.service
                 rm -rf /usr/local/lib/bhttp
                 rm -f /usr/local/bin/menu
