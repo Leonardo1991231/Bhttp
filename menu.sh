@@ -2,7 +2,7 @@
 
 # ==========================================
 # SUITE DE ADMINISTRACIÓN - LeoLatam SSH
-# Desarrollado por @Leonardo1991231
+# Comando de inicio: bhttp
 # ==========================================
 
 RED="\033[0;31m"
@@ -18,7 +18,7 @@ mkdir -p /usr/local/lib/bhttp
 touch "$DB_LIMITES"
 
 if [ "$EUID" -ne 0 ]; then
-  echo -e "${RED}[ERROR] Ejecuta el panel como root (sudo menu).${NC}"
+  echo -e "${RED}[ERROR] Ejecuta el panel como root (sudo bhttp).${NC}"
   exit 1
 fi
 
@@ -298,7 +298,7 @@ limpiar_vencidos() {
                 crontab -l 2>/dev/null | grep -v "limpiar-auto" | crontab -
                 echo -e "${YELLOW}[!] Limpieza automática desactivada.${NC}"
             else
-                (crontab -l 2>/dev/null; echo "0 3 * * * /usr/local/bin/menu --limpiar-auto") | crontab -
+                (crontab -l 2>/dev/null; echo "0 3 * * * /usr/local/bin/bhttp --limpiar-auto") | crontab -
                 echo -e "${GREEN}[✓] Limpieza automática activada (se ejecutará diario a las 03:00 AM).${NC}"
             fi
             sleep 2
@@ -355,14 +355,14 @@ while true; do
             journalctl -u 'bhttp*' -f
             ;;
         9)
-            echo -ne "\n${RED}¿Seguro que deseas eliminar todo el sistema BHTTP y el menú? (s/n): ${NC}"
+            echo -ne "\n${RED}¿Seguro que deseas eliminar todo el sistema BHTTP y el panel? (s/n): ${NC}"
             read CONFIRMAR
             if [[ "$CONFIRMAR" == "s" || "$CONFIRMAR" == "S" ]]; then
                 systemctl stop 'bhttp*' 2>/dev/null
                 systemctl disable 'bhttp*' 2>/dev/null
                 rm -f /etc/systemd/system/bhttp*.service
                 rm -rf /usr/local/lib/bhttp
-                rm -f /usr/local/bin/menu
+                rm -f /usr/local/bin/bhttp
                 crontab -l 2>/dev/null | grep -v "limpiar-auto" | crontab -
                 systemctl daemon-reload
                 echo -e "${GREEN}[✓] Sistema desinstalado por completo.${NC}"
@@ -370,7 +370,7 @@ while true; do
             fi
             ;;
         0)
-            echo -e "\n${CYAN}¡Hasta luego! Escribe 'menu' cuando quieras volver.${NC}"
+            echo -e "\n${CYAN}¡Hasta luego! Escribe 'bhttp' cuando quieras volver.${NC}"
             exit 0
             ;;
         *)
