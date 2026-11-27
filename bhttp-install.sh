@@ -484,7 +484,7 @@ class Server:
     def __init__(self, host, port, backend):
         self.host, self.port, self.backend = host, port, backend
         self.sessions = {}
-        self.slock = asyncio.Lock()
+        self.slock = None
 
     async def get_session(self, sess):
         async with self.slock:
@@ -568,6 +568,10 @@ class Server:
         writer.write(bytes([2]) + len(body).to_bytes(4, "big") + body)
 
     async def serve(self):
+        # Create the lock in the running loop. Python 3.8 binds asyncio.Lock
+        # to the default loop at construction time; creating it in __init__
+        # before asyncio.run() can bind it to a different loop.
+        self.slock = asyncio.Lock()
         srv = await asyncio.start_server(self.handle, self.host, self.port, backlog=512)
         print("BHTTP escuchando en %s:%d -> backend %s:%d"
               % (self.host, self.port, self.backend[0], self.backend[1]), flush=True)
