@@ -18,17 +18,57 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# Obtener puertos activos de BHTTP
-get_puertos() {
+# Modo automático silencioso para el Cron (Limpieza de madrugada)
+if [ "$1" == "--limpiar-auto" ]; then
+    HOY=$(date +%s)
+    for USER in $(awk -F: '$7 == "/bin/false" {print $1}' /etc/passwd); do
+        EXP_STR=$(chage -l "$USER" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+        if [[ "$EXP_STR" != "never" && ! -z "$EXP_STR" ]]; then
+            EXP_SEC=$(date -d "$EXP_STR" +%s 2>/dev/null)
+            if [ ! -z "$EXP_SEC" ] && [ "$EXP_SEC" -lt "$HOY" ]; then
+                pkill -u "$USER" 2>/dev/null
+                userdel -f "$USER" 2>/dev/null
+            fi
+        fi
+    done
+    exit 0
+fi
+
+# Obtener métricas del sistema, puertos y usuarios en vivo
+get_stats() {
     PUERTOS_ACTIVOS=$(grep -h -oP '(?<=--port )\d+' /etc/systemd/system/bhttp*.service 2>/dev/null | tr '\n' ' ')
     if [ -z "$PUERTOS_ACTIVOS" ]; then
         PUERTOS_ACTIVOS="${RED}Ninguno activo${NC}"
     else
         PUERTOS_ACTIVOS="${GREEN}$PUERTOS_ACTIVOS${NC}"
     fi
+
+    RAM_TOTAL=$(free -m | awk '/Mem:/ {print $2}')
+    RAM_USADA=$(free -m | awk '/Mem:/ {print $3}')
+    RAM_PORC=$((RAM_USADA * 100 / RAM_TOTAL))
+
+    CPU_USO=$(top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8"%"}')
+    CONECTADOS=$(ps -ef | grep "sshd:" | grep -v "grep\|root\|priv" | wc -l)
+
+    if crontab -l 2>/dev/null | grep -q "limpiar-auto"; then
+        CRON_ESTADO="${GREEN}ACTIVO (03:00 AM)${NC}"
+    else
+        CRON_ESTADO="${RED}INACTIVO${NC}"
+    fi
 }
 
-# 1. Agregar puerto adicional (Multipuertos)
+# Abrir puerto en Firewall automáticamente (UFW e iptables)
+abrir_firewall() {
+    local PUERTO_FW=$1
+    if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
+        ufw allow "$PUERTO_FW"/tcp >/dev/null 2>&1
+    fi
+    if command -v iptables &> /dev/null; then
+        iptables -I INPUT -p tcp --dport "$PUERTO_FW" -j ACCEPT 2>/dev/null
+    fi
+}
+
+# 1. Agregar puerto adicional (Multipuertos + Firewall)
 agregar_puerto() {
     echo -e "\n${CYAN}--- ABRIR NUEVO PUERTO BHTTP ---${NC}"
     echo -ne "${YELLOW}Introduce el puerto libre que deseas abrir (Ej: 8880): ${NC}"
@@ -60,10 +100,11 @@ User=root
 WantedBy=multi-user.target
 EOF
 
+    abrir_firewall "$NUEVO_PUERTO"
     systemctl daemon-reload
     systemctl enable bhttp-$NUEVO_PUERTO >/dev/null 2>&1
     systemctl start bhttp-$NUEVO_PUERTO
-    echo -e "${GREEN}[✓] ¡Puerto $NUEVO_PUERTO abierto y funcionando en simultáneo!${NC}"
+    echo -e "${GREEN}[✓] ¡Puerto $NUEVO_PUERTO abierto y habilitado en Firewall!${NC}"
     sleep 2
 }
 
@@ -71,7 +112,7 @@ EOF
 gestionar_puertos() {
     echo -e "\n${CYAN}--- GESTIONAR / CERRAR PUERTOS ---${NC}"
     echo -e "Puertos configurados: $PUERTOS_ACTIVOS"
-    echo -ne "${YELLOW}Escribe el puerto que deseas cerrar/eliminar (o Enter para volver): ${NC}"
+    echo -ne "${YELLOW}Escribe el puerto que deseas cerrar/cambiar (o Enter para volver): ${NC}"
     read PUERTO_DEL
 
     if [ -z "$PUERTO_DEL" ]; then return; fi
@@ -83,14 +124,15 @@ gestionar_puertos() {
         systemctl daemon-reload
         echo -e "${GREEN}[✓] Puerto $PUERTO_DEL cerrado y eliminado.${NC}"
     elif grep -q -- "--port $PUERTO_DEL" /etc/systemd/system/bhttp.service 2>/dev/null; then
-        echo -ne "${YELLOW}Ese es el puerto principal. Introduce el nuevo puerto para reemplazarlo: ${NC}"
+        echo -ne "${YELLOW}Ese es el puerto principal. Introduce el nuevo puerto: ${NC}"
         read REEMPLAZO
         if [[ "$REEMPLAZO" =~ ^[0-9]+$ ]] && ! lsof -i :"$REEMPLAZO" >/dev/null 2>&1; then
             sed -i "s/--port $PUERTO_DEL/--port $REEMPLAZO/g" /etc/systemd/system/bhttp.service
             sed -i "s/puerto $PUERTO_DEL/puerto $REEMPLAZO/g" /etc/systemd/system/bhttp.service
+            abrir_firewall "$REEMPLAZO"
             systemctl daemon-reload
             systemctl restart bhttp
-            echo -e "${GREEN}[✓] Puerto principal cambiado a $REEMPLAZO.${NC}"
+            echo -e "${GREEN}[✓] Puerto principal cambiado a $REEMPLAZO y abierto en Firewall.${NC}"
         else
             echo -e "${RED}[!] Puerto inválido u ocupado.${NC}"
         fi
@@ -120,7 +162,6 @@ crear_usuario() {
         sleep 2; return
     fi
 
-    # Asegurar que /bin/false sea válido para túneles SSH sin consola
     grep -qxF '/bin/false' /etc/shells || echo '/bin/false' >> /etc/shells
 
     FECHA_EXP=$(date -d "+$DIAS days" +%Y-%m-%d)
@@ -143,9 +184,12 @@ crear_usuario() {
 # 4. Ver y eliminar usuarios SSH
 gestionar_usuarios() {
     echo -e "\n${CYAN}--- USUARIOS SSH REGISTRADOS ---${NC}"
-    awk -F: '$7 == "/bin/false" {print "  • Usuario: " $1}' /etc/passwd
+    for USER in $(awk -F: '$7 == "/bin/false" {print $1}' /etc/passwd); do
+        EXP=$(chage -l "$USER" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+        echo -e "  • Usuario: ${GREEN}$USER${NC} | Vence: ${YELLOW}$EXP${NC}"
+    done
     echo -e "${CYAN}---------------------------------${NC}"
-    echo -ne "${YELLOW}Escribe el usuario a eliminar (o presiona Enter para volver): ${NC}"
+    echo -ne "${YELLOW}Escribe el usuario a eliminar (o Enter para volver): ${NC}"
     read USER_DEL
 
     if [ ! -z "$USER_DEL" ]; then
@@ -159,10 +203,66 @@ gestionar_usuarios() {
         sleep 2
     fi
 }
+# 5. Monitor de usuarios conectados en vivo
+ver_conectados() {
+    echo -e "\n${CYAN}--- USUARIOS CONECTADOS EN VIVO ---${NC}"
+    LISTA=$(ps -ef | grep "sshd:" | grep -v "grep\|root\|priv" | awk '{print $9}' | cut -d@ -f1 | sort | uniq -c)
+    if [ -z "$LISTA" ]; then
+        echo -e "  ${YELLOW}No hay usuarios conectados en este momento.${NC}"
+    else
+        echo -e "${GREEN}Conexiones | Usuario${NC}"
+        echo "$LISTA"
+    fi
+    echo -e "${CYAN}-----------------------------------${NC}"
+    echo -ne "Presiona Enter para volver..."
+    read
+}
+
+# 6. Limpiador de usuarios vencidos (Manual + Programador Automático)
+limpiar_vencidos() {
+    echo -e "\n${CYAN}--- LIMPIADOR DE CUENTAS VENCIDAS ---${NC}"
+    echo -e "  ${GREEN}1)${NC} Limpiar cuentas vencidas AHORA"
+    echo -e "  ${GREEN}2)${NC} Activar / Desactivar limpieza automática (03:00 AM)"
+    echo -e "  ${YELLOW}0)${NC} Volver"
+    echo -ne "\n${YELLOW}Elige una opción: ${NC}"
+    read SUB_OPC
+
+    case $SUB_OPC in
+        1)
+            echo -e "\n${BLUE}[*] Buscando cuentas expiradas...${NC}"
+            HOY=$(date +%s)
+            ELIMINADOS=0
+            for USER in $(awk -F: '$7 == "/bin/false" {print $1}' /etc/passwd); do
+                EXP_STR=$(chage -l "$USER" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+                if [[ "$EXP_STR" != "never" && ! -z "$EXP_STR" ]]; then
+                    EXP_SEC=$(date -d "$EXP_STR" +%s 2>/dev/null)
+                    if [ ! -z "$EXP_SEC" ] && [ "$EXP_SEC" -lt "$HOY" ]; then
+                        pkill -u "$USER" 2>/dev/null
+                        userdel -f "$USER" 2>/dev/null
+                        echo -e "  ${RED}[-] Eliminado:${NC} $USER (Venció el $EXP_STR)"
+                        ELIMINADOS=$((ELIMINADOS + 1))
+                    fi
+                fi
+            done
+            echo -e "${GREEN}[✓] Limpieza terminada. Cuentas borradas: $ELIMINADOS${NC}"
+            sleep 2.5
+            ;;
+        2)
+            if crontab -l 2>/dev/null | grep -q "limpiar-auto"; then
+                crontab -l 2>/dev/null | grep -v "limpiar-auto" | crontab -
+                echo -e "${YELLOW}[!] Limpieza automática desactivada.${NC}"
+            else
+                (crontab -l 2>/dev/null; echo "0 3 * * * /usr/local/bin/menu --limpiar-auto") | crontab -
+                echo -e "${GREEN}[✓] Limpieza automática activada (se ejecutará diario a las 03:00 AM).${NC}"
+            fi
+            sleep 2
+            ;;
+    esac
+}
 
 # Bucle principal
 while true; do
-    get_puertos
+    get_stats
     clear
     echo -e "${CYAN}=====================================================================${NC}"
     echo -e "${PURPLE}"'  _               _           _                     ____ ____ _   _ '
@@ -172,18 +272,22 @@ while true; do
     echo -e ' |_____\___|\___/|_____\__,_| \__\__,_|_| |_| |_|  |____/____/|_| |_|'"${NC}"
     echo -e "                     ${YELLOW}Panel Oficial BHTTP - VPS${NC}"
     echo -e "${CYAN}=====================================================================${NC}"
+    echo -e "  ${YELLOW}CPU:${NC} ${GREEN}$CPU_USO${NC}  |  ${YELLOW}RAM:${NC} ${GREEN}${RAM_USADA}MB/${RAM_TOTAL}MB (${RAM_PORC}%)${NC}  |  ${YELLOW}En Vivo:${NC} ${BLUE}$CONECTADOS online${NC}"
     echo -e "  ${YELLOW}Puertos BHTTP Activos :${NC} $PUERTOS_ACTIVOS"
+    echo -e "  ${YELLOW}Auto-Limpieza Cuentas :${NC} $CRON_ESTADO"
     echo -e "${CYAN}---------------------------------------------------------------------${NC}"
-    echo -e "  ${GREEN}[1]${NC} Abrir Nuevo Puerto BHTTP (Multipuertos)"
-    echo -e "  ${GREEN}[2]${NC} Cambiar Puerto Principal / Cerrar un Puerto"
-    echo -e "  ${GREEN}[3]${NC} Crear Usuario SSH (Con vencimiento)"
-    echo -e "  ${GREEN}[4]${NC} Ver / Eliminar Usuarios SSH"
-    echo -e "  ${GREEN}[5]${NC} Reiniciar Todos los Servicios BHTTP"
-    echo -e "  ${GREEN}[6]${NC} Ver Monitor de Conexiones (Logs en vivo)"
-    echo -e "  ${RED}[7]${NC} Desinstalar LeoLatam SSH y BHTTP"
-    echo -e "  ${YELLOW}[0]${NC} Salir del Panel"
+    echo -e "  ${GREEN}1)${NC} Abrir Nuevo Puerto BHTTP (Multipuertos + Firewall)"
+    echo -e "  ${GREEN}2)${NC} Cambiar Puerto Principal / Cerrar un Puerto"
+    echo -e "  ${GREEN}3)${NC} Crear Usuario SSH (Con vencimiento)"
+    echo -e "  ${GREEN}4)${NC} Ver / Eliminar Usuarios SSH"
+    echo -e "  ${GREEN}5)${NC} Monitor de Usuarios Conectados en Vivo"
+    echo -e "  ${GREEN}6)${NC} Limpiador de Usuarios Vencidos (Manual / Automático)"
+    echo -e "  ${GREEN}7)${NC} Reiniciar Todos los Servicios BHTTP"
+    echo -e "  ${GREEN}8)${NC} Ver Logs del Túnel en Vivo"
+    echo -e "  ${RED}9)${NC} Desinstalar LeoLatam SSH y BHTTP"
+    echo -e "  ${YELLOW}0)${NC} Salir del Panel"
     echo -e "${CYAN}=====================================================================${NC}"
-    echo -ne "${YELLOW}Selecciona una opción [0-7]: ${NC}"
+    echo -ne "${YELLOW}Selecciona una opción [0-9]: ${NC}"
     read OPCION
 
     case $OPCION in
@@ -191,18 +295,20 @@ while true; do
         2) gestionar_puertos ;;
         3) crear_usuario ;;
         4) gestionar_usuarios ;;
-        5)
+        5) ver_conectados ;;
+        6) limpiar_vencidos ;;
+        7)
             echo -e "\n${BLUE}[*] Reiniciando servicios BHTTP...${NC}"
             systemctl restart bhttp* 2>/dev/null
             echo -e "${GREEN}[✓] Todos los puertos reiniciados.${NC}"
             sleep 1.5
             ;;
-        6)
+        8)
             echo -e "\n${CYAN}[*] Mostrando logs en vivo (Presiona Ctrl + C para salir)...${NC}\n"
             sleep 1
             journalctl -u 'bhttp*' -f
             ;;
-        7)
+        9)
             echo -ne "\n${RED}¿Seguro que deseas eliminar todo el sistema BHTTP y el menú? (s/n): ${NC}"
             read CONFIRMAR
             if [[ "$CONFIRMAR" == "s" || "$CONFIRMAR" == "S" ]]; then
@@ -211,6 +317,7 @@ while true; do
                 rm -f /etc/systemd/system/bhttp*.service
                 rm -rf /usr/local/lib/bhttp
                 rm -f /usr/local/bin/menu
+                crontab -l 2>/dev/null | grep -v "limpiar-auto" | crontab -
                 systemctl daemon-reload
                 echo -e "${GREEN}[✓] Sistema desinstalado por completo.${NC}"
                 exit 0
