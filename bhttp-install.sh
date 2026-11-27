@@ -7,6 +7,8 @@ DESTDIR="/usr/local/lib/bhttp"
 SERVER_PY="$DESTDIR/bhttp-server.py"
 UNIT="/etc/systemd/system/bhttp.service"
 SERVICE="bhttp"
+MENU_BIN="/usr/local/bin/bhttp"
+MENU_URL="https://raw.githubusercontent.com/Leonardo1991231/Bhttp/main/menu.sh"
 CANDIDATOS=(8080 80 8443 443 2082 2095 8880 2052 3128)
 
 PUERTO=""; SSHPORT=22; DESINSTALAR=0; NUEVO_USER=""; NUEVO_PASS=""; SOLO_DIAG=0
@@ -25,10 +27,15 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-rojo()  { printf '\033[31m%s\033[0m\n' "$*"; }
-verde() { printf '\033[32m%s\033[0m\n' "$*"; }
-info()  { printf '  %s\n' "$*"; }
-paso()  { printf '\n[%s] %s\n' "$1" "$2"; }
+rojo()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
+verde()  { printf '\033[1;36m%s\033[0m\n' "$*"; }
+info()   { printf '  \033[0;36m%s\033[0m\n' "$*"; }
+paso()   { printf '\n\033[1;34m[%s]\033[0m \033[1;36m%s\033[0m\n' "$1" "$2"; }
+banner() {
+  printf '\n\033[1;34m╔══════════════════════════════════════════════╗\033[0m\n'
+  printf '\033[1;34m║\033[0m  \033[1;36mLeoLatam SSH · Instalador BHTTP\033[0m              \033[1;34m║\033[0m\n'
+  printf '\033[1;34m╚══════════════════════════════════════════════╝\033[0m\n'
+}
 
 [ "$(id -u 2>/dev/null || echo 0)" != 0 ] && { rojo "Ejecutalo como root:  sudo bash $0"; exit 2; }
 
@@ -157,7 +164,7 @@ if [ -n "$NUEVO_USER" ]; then
     echo "   Ponlos en la app (campos usuario/clave del SSH)."
   fi
   # si solo se pidio crear usuario (sin nada mas), terminamos aqui
-  [ -z "$PUERTO$DESINSTALAR" ] && { echo; echo "Usuario creado. Para (re)instalar el servidor:  sudo bash $0"; exit 0; }
+  [ -z "$PUERTO$DESINSTALAR" ] && [ "$SOLO_DIAG" = 0 ] && { echo; echo "Usuario creado. Para (re)instalar el servidor:  sudo bash $0"; exit 0; }
   echo
 fi
 
@@ -173,11 +180,35 @@ if [ "$DESINSTALAR" = 1 ]; then
   systemctl stop "$SERVICE" 2>/dev/null
   systemctl disable "$SERVICE" 2>/dev/null
   rm -f "$UNIT"; rm -rf "$DESTDIR"
+  rm -f "$MENU_BIN"
   rm -f /etc/sysctl.d/99-bhttp.conf /etc/security/limits.d/99-bhttp.conf
   systemctl daemon-reload 2>/dev/null
   verde "Servidor BHTTP desinstalado (tuning de red revertido; reinicia para aplicar del todo)."
   exit 0
 fi
+
+banner
+paso "0/4" "Preparando el comando global bhttp"
+TMP_MENU="$(mktemp)" || { rojo "No pude crear un archivo temporal para el menú."; exit 1; }
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+if [ -n "$SCRIPT_DIR" ] && [ -r "$SCRIPT_DIR/menu.sh" ]; then
+  cp "$SCRIPT_DIR/menu.sh" "$TMP_MENU" || { rm -f "$TMP_MENU"; rojo "No se pudo preparar el menú local."; exit 1; }
+elif command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$MENU_URL" -o "$TMP_MENU" || { rm -f "$TMP_MENU"; rojo "No se pudo descargar el menú desde GitHub: $MENU_URL"; exit 1; }
+elif command -v wget >/dev/null 2>&1; then
+  wget -q -O "$TMP_MENU" "$MENU_URL" || { rm -f "$TMP_MENU"; rojo "No se pudo descargar el menú desde GitHub: $MENU_URL"; exit 1; }
+else
+  rm -f "$TMP_MENU"
+  rojo "Se necesita curl o wget para descargar el menú de LeoLatam SSH."
+  exit 1
+fi
+if ! bash -n "$TMP_MENU"; then
+  rm -f "$TMP_MENU"
+  rojo "El menú descargado no pasó la comprobación de sintaxis; no se instaló."
+  exit 1
+fi
+install -m 0755 "$TMP_MENU" "$MENU_BIN" && rm -f "$TMP_MENU" || { rm -f "$TMP_MENU"; rojo "No se pudo instalar el comando $MENU_BIN."; exit 1; }
+verde "Comando global instalado: escribe bhttp para abrir el menú LeoLatam SSH."
 
 echo "=== Instalar servidor BHTTP propio ==="
 
@@ -618,8 +649,3 @@ fi
 rojo "=== El servidor arranco pero no valido el protocolo ==="
 echo "  Revisa:  journalctl -u $SERVICE -n 30 --no-pager"
 exit 1
-# Instalar Panel LeoLatam SSH (comando: bhttp)
-H="https://"
-U="://githubusercontent.com"
-wget -q -O /usr/local/bin/bhttp "${H}${U}" && chmod +x /usr/local/bin/bhttp
-echo -e "\033[1;33m[★] Panel LeoLatam SSH listo: escribe 'bhttp' en la terminal\033[0m"
