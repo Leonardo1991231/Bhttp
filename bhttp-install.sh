@@ -11,6 +11,7 @@ MENU_BIN="/usr/local/bin/bhttp"
 MENU_URL="https://raw.githubusercontent.com/Leonardo1991231/Bhttp/main/menu.sh"
 LIMITER_SCRIPT="/usr/local/lib/bhttp/bhttp-limiter.sh"
 LIMITER_UNIT="/etc/systemd/system/bhttp-limiter.service"
+PUERTO_EXISTENTE="$(grep -h -oP '(?<=--port )\d+' "$UNIT" 2>/dev/null | head -1)"
 CANDIDATOS=(8080 80 8443 443 2082 2095 8880 2052 3128)
 
 PUERTO=""; SSHPORT=22; DESINSTALAR=0; NUEVO_USER=""; NUEVO_PASS=""; SOLO_DIAG=0
@@ -243,10 +244,19 @@ ocupados() {
     netstat -tln 2>/dev/null | awk '/^tcp/ {print $4}' | sed 's/.*://'
   fi | grep -E '^[0-9]+$' | sort -u
 }
-libre() { ! ocupados | grep -qx "$1"; }
+libre() {
+  if [ "$1" = "$PUERTO_EXISTENTE" ] && systemctl is-active --quiet "$SERVICE"; then
+    return 0
+  fi
+  ! ocupados | grep -qx "$1"
+}
 
 primer_libre=""
-for p in "${CANDIDATOS[@]}"; do libre "$p" && { primer_libre="$p"; break; }; done
+if [ -n "$PUERTO_EXISTENTE" ] && systemctl is-active --quiet "$SERVICE"; then
+  primer_libre="$PUERTO_EXISTENTE"
+else
+  for p in "${CANDIDATOS[@]}"; do libre "$p" && { primer_libre="$p"; break; }; done
+fi
 
 if [ -z "$PUERTO" ]; then
   if [ -t 0 ]; then
